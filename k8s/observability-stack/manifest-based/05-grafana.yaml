@@ -1,0 +1,434 @@
+---
+# PersistentVolumeClaim for Grafana data
+# Stores: dashboards, datasources, plugins, user preferences
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-pvc
+  namespace: observability-stack
+spec:
+  # Longhorn storage class for distributed block storage
+  storageClassName: longhorn
+  
+  accessModes:
+    # ReadWriteOnce: Single node can mount read-write
+    - ReadWriteOnce
+  
+  resources:
+    requests:
+      # 5GB: dashboards, config, plugins
+      storage: 5Gi
+
+---
+# ConfigMap for Grafana datasource provisioning
+# Auto-configures VictoriaMetrics datasource on startup
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: observability-stack
+data:
+  # Datasource configuration in YAML format
+  datasources.yaml: |
+    apiVersion: 1
+    
+    # Delete existing datasources before adding new ones
+    deleteDatasources:
+      - name: VictoriaMetrics
+        orgId: 1
+      - name: Loki
+        orgId: 1
+    
+    datasources:
+      # VictoriaMetrics datasource (Prometheus-compatible)
+      - name: VictoriaMetrics
+        type: prometheus
+        access: proxy  # Grafana server proxies requests
+        url: http://vmselect:8481/select/0/prometheus
+        isDefault: true  # Default datasource for new panels
+        editable: true
+        jsonData:
+          # Query timeout
+          timeInterval: 15s
+          # Enable query caching
+          httpMethod: POST
+        # Connection test on startup
+        version: 1
+      
+      # Loki datasource for logs
+      - name: Loki
+        type: loki
+        access: proxy
+        url: http://loki:3100
+        editable: true
+        jsonData:
+          # Max number of log lines
+          maxLines: 1000
+          # Derive fields from logs (extract trace IDs)
+          derivedFields:
+            - datasourceUid: tempo
+              matcherRegex: "trace_id=(\\w+)"
+              name: TraceID
+              url: "${__value.raw}"
+        version: 1
+
+---
+# ConfigMap for Grafana dashboard provisioning
+# Auto-loads dashboards from ConfigMap on startup
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards-config
+  namespace: observability-stack
+data:
+  # Dashboard provider configuration
+  dashboards.yaml: |
+    apiVersion: 1
+    
+    providers:
+      - name: 'default'
+        orgId: 1
+        folder: ''  # Root folder
+        type: file
+        disableDeletion: false  # Allow deletion from UI
+        editable: true  # Allow editing from UI
+        options:
+          path: /var/lib/grafana/dashboards
+
+---
+# ConfigMap containing actual dashboard JSON
+# Initial dashboard showing metrics from test generator
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: observability-stack
+data:
+  # Demo metrics dashboard
+  demo-metrics.json: |
+    {
+      "dashboard": {
+        "title": "Demo Application Metrics",
+        "tags": ["demo", "victoriametrics"],
+        "timezone": "browser",
+        "schemaVersion": 16,
+        "refresh": "5s",
+        "time": {
+          "from": "now-15m",
+          "to": "now"
+        },
+        "panels": [
+          {
+            "id": 1,
+            "title": "CPU Usage (%)",
+            "type": "graph",
+            "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+            "targets": [
+              {
+                "expr": "app_cpu_usage",
+                "legendFormat": "{{instance}} - {{mode}}"
+              }
+            ],
+            "yaxes": [
+              {"label": "CPU %", "min": 0, "max": 100},
+              {"show": false}
+            ],
+            "alert": {
+              "conditions": [
+                {
+                  "evaluator": {"params": [80], "type": "gt"},
+                  "operator": {"type": "and"},
+                  "query": {"params": ["A", "5m", "now"]},
+                  "reducer": {"params": [], "type": "avg"},
+                  "type": "query"
+                }
+              ],
+              "name": "High CPU Alert",
+              "message": "CPU usage is above 80%"
+            }
+          },
+          {
+            "id": 2,
+            "title": "Memory Usage (MB)",
+            "type": "graph",
+            "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+            "targets": [
+              {
+                "expr": "app_memory_bytes / 1024 / 1024",
+                "legendFormat": "{{instance}}"
+              }
+            ],
+            "yaxes": [
+              {"label": "Memory MB", "min": 0},
+              {"show": false}
+            ]
+          },
+          {
+            "id": 3,
+            "title": "Request Latency (ms)",
+            "type": "graph",
+            "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+            "targets": [
+              {
+                "expr": "app_request_duration_milliseconds",
+                "legendFormat": "{{instance}}"
+              }
+            ],
+            "yaxes": [
+              {"label": "Latency ms", "min": 0},
+              {"show": false}
+            ]
+          },
+          {
+            "id": 4,
+            "title": "Error Rate",
+            "type": "graph",
+            "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+            "targets": [
+              {
+                "expr": "rate(app_error_count[1m]) * 60",
+                "legendFormat": "Errors per minute"
+              }
+            ],
+            "yaxes": [
+              {"label": "Errors/min", "min": 0},
+              {"show": false}
+            ]
+          },
+          {
+            "id": 5,
+            "title": "Active Alerts",
+            "type": "stat",
+            "gridPos": {"x": 0, "y": 16, "w": 6, "h": 4},
+            "targets": [
+              {
+                "expr": "count(ALERTS{alertstate=\"firing\"})"
+              }
+            ],
+            "options": {
+              "colorMode": "background",
+              "graphMode": "none"
+            },
+            "fieldConfig": {
+              "defaults": {
+                "thresholds": {
+                  "steps": [
+                    {"value": 0, "color": "green"},
+                    {"value": 1, "color": "red"}
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "id": 6,
+            "title": "Request Success Rate",
+            "type": "gauge",
+            "gridPos": {"x": 6, "y": 16, "w": 6, "h": 4},
+            "targets": [
+              {
+                "expr": "(1 - (app_error_count / app_request_total)) * 100"
+              }
+            ],
+            "options": {
+              "showThresholdLabels": false,
+              "showThresholdMarkers": true
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "percent",
+                "min": 0,
+                "max": 100,
+                "thresholds": {
+                  "steps": [
+                    {"value": 0, "color": "red"},
+                    {"value": 90, "color": "yellow"},
+                    {"value": 95, "color": "green"}
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+
+---
+# Deployment for Grafana
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: grafana
+  namespace: observability-stack
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+
+  serviceName: grafana
+
+  selector:
+    matchLabels:
+      app: grafana
+  
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      # Security context for Grafana process
+      securityContext:
+        fsGroup: 472  # Grafana user/group ID
+        runAsUser: 472
+        runAsNonRoot: true
+      
+      containers:
+      - name: grafana
+        image: grafana/grafana:12.3.0
+        
+        ports:
+        - containerPort: 3000
+          name: http
+          protocol: TCP
+        
+        # Environment variables for Grafana configuration
+        env:
+        # Admin credentials (CHANGE IN PRODUCTION!)
+        - name: GF_SECURITY_ADMIN_USER
+          value: admin
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          value: admin
+        
+        # Allow anonymous access for testing (disable in production)
+        - name: GF_AUTH_ANONYMOUS_ENABLED
+          value: "false"
+        
+        # Datasource provisioning path
+        - name: GF_PATHS_PROVISIONING
+          value: /etc/grafana/provisioning
+        
+        # Disable telemetry
+        - name: GF_ANALYTICS_REPORTING_ENABLED
+          value: "false"
+        - name: GF_ANALYTICS_CHECK_FOR_UPDATES
+          value: "false"
+        
+        # Server settings
+        - name: GF_SERVER_ROOT_URL
+          value: "%(protocol)s://%(domain)s:%(http_port)s/"
+        
+        # Enable alerting
+        - name: GF_ALERTING_ENABLED
+          value: "true"
+        - name: GF_UNIFIED_ALERTING_ENABLED
+          value: "true"
+        
+        # Resource allocation
+        resources:
+          requests:
+            cpu: 100m       # 0.1 CPU cores
+            memory: 256Mi   # 256MB RAM
+          limits:
+            cpu: 500m       # 0.5 CPU cores
+            memory: 512Mi   # 512MB RAM
+        
+        # Health checks
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+        
+        # Volume mounts
+        volumeMounts:
+        # Persistent storage for Grafana data
+        - name: storage
+          mountPath: /var/lib/grafana
+        
+        # Datasource provisioning
+        - name: datasources
+          mountPath: /etc/grafana/provisioning/datasources
+        
+        # Dashboard provisioning config
+        - name: dashboards-config
+          mountPath: /etc/grafana/provisioning/dashboards
+        
+        # Actual dashboards
+        #- name: dashboards
+        #  mountPath: /var/lib/grafana/dashboards
+      
+      volumes:
+      # Persistent volume for Grafana data
+      - name: storage
+        persistentVolumeClaim:
+          claimName: grafana-pvc
+      
+      # Datasources ConfigMap
+      - name: datasources
+        configMap:
+          name: grafana-datasources
+      
+      # Dashboard provisioning config
+      - name: dashboards-config
+        configMap:
+          name: grafana-dashboards-config
+      
+      # Dashboard JSON files
+      #- name: dashboards
+      #  configMap:
+      #    name: grafana-dashboards
+
+---
+# ClusterIP service for internal access
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: observability-stack
+  labels:
+    app: grafana
+spec:
+  type: ClusterIP
+  
+  selector:
+    app: grafana
+  
+  ports:
+  - port: 3000
+    targetPort: 3000
+    protocol: TCP
+    name: http
+
+---
+# LoadBalancer service for external access
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-lb
+  namespace: observability-stack
+  labels:
+    app: grafana
+spec:
+  # LoadBalancer: MetalLB assigns external IP
+  type: LoadBalancer
+  
+  selector:
+    app: grafana
+  
+  ports:
+  - port: 3000
+    targetPort: 3000
+    protocol: TCP
+    name: http

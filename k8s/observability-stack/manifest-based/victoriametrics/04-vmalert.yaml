@@ -1,0 +1,259 @@
+---
+# ConfigMap containing alert and recording rules
+# Recording rules create aggregated metrics
+# Alert rules trigger notifications
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vmalert-config
+  namespace: observability-stack
+data:
+  # Alert rules file
+  alerts.yml: |
+    groups:
+      # High CPU alert - triggers when simulated CPU > 80%
+      - name: demo_alerts
+        interval: 30s
+        rules:
+          - alert: HighCPUUsage
+            # Triggers when app_cpu_usage metric exceeds 80%
+            expr: app_cpu_usage > 80
+            # Must be true for 2 minutes before firing
+            for: 2m
+            labels:
+              severity: warning
+              component: demo-app
+            annotations:
+              summary: "High CPU usage detected"
+              description: "CPU usage is {{ $value }}% on {{ $labels.instance }}"
+      
+      # Storage usage alerts
+      - name: storage_alerts
+        interval: 1m
+        rules:
+          - alert: HighStorageUsage
+            # PVC is > 80% full
+            expr: |
+              (kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes) * 100 > 80
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "PVC {{ $labels.persistentvolumeclaim }} is {{ $value | humanize }}% full"
+              description: "Storage may run out soon in namespace {{ $labels.namespace }}"
+  
+  # Recording rules file - generic aggregations for ALL metrics
+  recording-rules.yml: |
+    groups:
+      # Hourly aggregations - applied to all metrics automatically
+      # Retention: 12 months
+      - name: hourly_aggregation
+        interval: 5m  # Evaluate every 5 minutes
+        rules:
+          # Max value per hour for all metrics
+          - record: ":hourly_max"
+            expr: |
+              max_over_time({__name__=~".+"}[1h])
+          
+          # Average value per hour for all metrics
+          - record: ":hourly_avg"
+            expr: |
+              avg_over_time({__name__=~".+"}[1h])
+          
+          # Min value per hour for all metrics
+          - record: ":hourly_min"
+            expr: |
+              min_over_time({__name__=~".+"}[1h])
+      
+      # Daily aggregations - from hourly data
+      # Retention: 30 days, then deleted
+      - name: daily_aggregation
+        interval: 1h  # Evaluate every hour
+        rules:
+          # Max value per day
+          - record: ":daily_max"
+            expr: |
+              max_over_time({__name__=~".+:hourly_max"}[24h])
+          
+          # Average value per day
+          - record: ":daily_avg"
+            expr: |
+              avg_over_time({__name__=~".+:hourly_avg"}[24h])
+      
+      # Weekly aggregations - from daily data
+      # Retention: 12 months
+      - name: weekly_aggregation
+        interval: 6h  # Evaluate every 6 hours
+        rules:
+          # Max value per week
+          - record: ":weekly_max"
+            expr: |
+              max_over_time({__name__=~".+:daily_max"}[7d])
+          
+          # Average value per week
+          - record: ":weekly_avg"
+            expr: |
+              avg_over_time({__name__=~".+:daily_avg"}[7d])
+      
+      # Monthly aggregations - from weekly data
+      # Retention: 12 months
+      - name: monthly_aggregation
+        interval: 1d  # Evaluate daily
+        rules:
+          # Max value per month (30 days)
+          - record: ":monthly_max"
+            expr: |
+              max_over_time({__name__=~".+:weekly_max"}[30d])
+          
+          # Average value per month
+          - record: ":monthly_avg"
+            expr: |
+              avg_over_time({__name__=~".+:weekly_avg"}[30d])
+
+---
+# Deployment for vmalert - evaluates rules and sends alerts
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmalert
+  namespace: observability-stack
+  labels:
+    app: victoriametrics
+    component: vmalert
+spec:
+  replicas: 1
+  
+  selector:
+    matchLabels:
+      app: victoriametrics
+      component: vmalert
+  
+  template:
+    metadata:
+      labels:
+        app: victoriametrics
+        component: vmalert
+    spec:
+      containers:
+      - name: vmalert
+        image: victoriametrics/vmalert:v1.129.1
+        
+        args:
+          # HTTP API listen address
+          - -httpListenAddr=:8880
+          
+          # vmselect datasource for querying metrics
+          - -datasource.url=http://vmselect:8481/select/0/prometheus
+          
+          # vminsert endpoint for writing recording rules results
+          - -remoteWrite.url=http://vminsert:8480/insert/0/prometheus
+          
+          # vmselect endpoint for querying recording rules
+          - -remoteRead.url=http://vmselect:8481/select/0/prometheus
+          
+          # Rule files to evaluate
+          - -rule=/etc/vmalert/alerts.yml
+          - -rule=/etc/vmalert/recording-rules.yml
+          
+          # Evaluation interval for all rules
+          - -evaluationInterval=1m
+          
+          # External labels added to all alerts and recording rules
+          - -external.label=cluster=microk8s
+          - -external.label=environment=learning
+          
+          # Blackhole notifier: evaluate alerts but don't send notifications
+          # Remove this and add -notifier.url in Phase 7 with AlertManager
+          - -notifier.blackhole=true
+          
+          # ALERTMANAGER: Uncomment in Phase 7 when AlertManager is deployed
+          # - -notifier.url=http://alertmanager:9093
+        
+        ports:
+        - containerPort: 8880
+          name: http
+          protocol: TCP
+        
+        # Resource allocation
+        resources:
+          requests:
+            cpu: 100m       # 0.1 CPU cores
+            memory: 256Mi   # 256MB RAM
+          limits:
+            cpu: 500m       # 0.5 CPU cores
+            memory: 512Mi   # 512MB RAM
+        
+        # Health checks
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8880
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8880
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+        
+        # Mount config files
+        volumeMounts:
+        - name: config
+          mountPath: /etc/vmalert
+      
+      volumes:
+      - name: config
+        configMap:
+          name: vmalert-config
+
+---
+# ClusterIP service for vmalert
+apiVersion: v1
+kind: Service
+metadata:
+  name: vmalert
+  namespace: observability-stack
+  labels:
+    app: victoriametrics
+    component: vmalert
+spec:
+  type: ClusterIP
+  
+  selector:
+    app: victoriametrics
+    component: vmalert
+  
+  ports:
+  - port: 8880
+    targetPort: 8880
+    protocol: TCP
+    name: http
+
+---
+# LoadBalancer service for external access to vmalert UI
+apiVersion: v1
+kind: Service
+metadata:
+  name: vmalert-lb
+  namespace: observability-stack
+  labels:
+    app: victoriametrics
+    component: vmalert
+spec:
+  type: LoadBalancer
+  
+  selector:
+    app: victoriametrics
+    component: vmalert
+  
+  ports:
+  - port: 8880
+    targetPort: 8880
+    protocol: TCP
+    name: http

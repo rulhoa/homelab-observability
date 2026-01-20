@@ -1,0 +1,140 @@
+---
+# Deployment for vminsert - handles metric ingestion
+# Stateless component: can be scaled horizontally
+# Receives metrics from Prometheus/Alloy and writes to vmstorage
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vminsert
+  namespace: observability-stack
+  labels:
+    app: victoriametrics
+    component: vminsert
+spec:
+  # Single replica for now
+  # REPLICATION: Increase to 2-3 for HA and load distribution
+  replicas: 1
+  
+  # RollingUpdate strategy: update pods one at a time with zero downtime
+  # New pod must be Ready before old pod is terminated
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0  # Keep at least 1 pod running during update
+      maxSurge: 1        # Allow 1 extra pod during update
+  
+  selector:
+    matchLabels:
+      app: victoriametrics
+      component: vminsert
+  
+  template:
+    metadata:
+      labels:
+        app: victoriametrics
+        component: vminsert
+    spec:
+      containers:
+      - name: vminsert
+        image: victoriametrics/vminsert:v1.129.1-cluster
+        
+        args:
+          # HTTP API listen address
+          - -httpListenAddr=:8480
+          
+          # vmstorage backend addresses
+          # For single replica: just vmstorage-0
+          # REPLICATION: For 3 replicas, use:
+          # - -storageNode=vmstorage-0.vmstorage:8400,vmstorage-1.vmstorage:8400,vmstorage-2.vmstorage:8400
+          - -storageNode=vmstorage-0.vmstorage:8400
+          
+          # Replication factor: how many vmstorage nodes store each sample
+          # REPLICATION: Set to 2 for redundancy (requires 3+ vmstorage replicas)
+          # - -replicationFactor=2
+          
+          # Memory for buffering before writing to storage
+          - -memory.allowedPercent=80
+          
+          # Max number of concurrent inserts to vmstorage
+          - -maxConcurrentInserts=8
+        
+        ports:
+        - containerPort: 8480
+          name: http
+          protocol: TCP
+        
+        # Resource allocation
+        resources:
+          requests:
+            cpu: 250m       # 0.25 CPU cores
+            memory: 512Mi   # 512MB RAM
+          limits:
+            cpu: 1000m      # 1 CPU core
+            memory: 1Gi     # 1GB RAM
+        
+        # Health checks
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8480
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8480
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+
+---
+# ClusterIP service for vminsert
+# Used by Prometheus/Alloy to send metrics
+apiVersion: v1
+kind: Service
+metadata:
+  name: vminsert
+  namespace: observability-stack
+  labels:
+    app: victoriametrics
+    component: vminsert
+spec:
+  type: ClusterIP
+  
+  selector:
+    app: victoriametrics
+    component: vminsert
+  
+  ports:
+  - port: 8480
+    targetPort: 8480
+    protocol: TCP
+    name: http
+
+---
+# ClusterIP service for vminsert
+# Used by Prometheus/Alloy to send metrics
+apiVersion: v1
+kind: Service
+metadata:
+  name: vminsert-lb
+  namespace: observability-stack
+  labels:
+    app: victoriametrics
+    component: vminsert
+spec:
+  type: LoadBalancer
+  
+  selector:
+    app: victoriametrics
+    component: vminsert
+  
+  ports:
+  - port: 8480
+    targetPort: 8480
+    protocol: TCP
+    name: http

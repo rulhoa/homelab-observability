@@ -1,0 +1,51 @@
+---
+# Test deployment - simple nginx web server
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-nginx
+  namespace: observability-stack
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-nginx
+  template:
+    metadata:
+      labels:
+        app: test-nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+          name: http
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+
+---
+# LoadBalancer service - MetalLB should assign external IP
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-nginx-lb
+  namespace: observability-stack
+spec:
+  # LoadBalancer type triggers MetalLB IP assignment
+  type: LoadBalancer
+  
+  # Selector targets the nginx pod
+  selector:
+    app: test-nginx
+  
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+    name: http

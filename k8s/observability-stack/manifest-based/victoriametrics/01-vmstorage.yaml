@@ -1,0 +1,173 @@
+---
+# StatefulSet for vmstorage - persistent metric storage backend
+# Uses StatefulSet (not Deployment) because it needs:
+# - Stable network identity (vmstorage-0, vmstorage-1, etc.)
+# - Persistent storage that follows the pod
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vmstorage
+  namespace: observability-stack
+  labels:
+    app: victoriametrics
+    component: vmstorage
+spec:
+  # Single replica - no replication at app level
+  # REPLICATION: Change to 3 for HA with data redundancy
+  replicas: 1
+  
+  # Service name for stable network identity
+  serviceName: vmstorage
+  
+  # RollingUpdate for StatefulSets: updates pods one at a time
+  # Waits for pod to be Ready before updating next one
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      partition: 0  # Update all pods (0 means no partition)
+  
+  # Pod management policy: OrderedReady ensures sequential startup/shutdown (default)
+  # vmstorage-0 must be ready before vmstorage-1 starts
+  podManagementPolicy: OrderedReady
+  
+  selector:
+    matchLabels:
+      app: victoriametrics
+      component: vmstorage
+  
+  template:
+    metadata:
+      labels:
+        app: victoriametrics
+        component: vmstorage
+    spec:
+      containers:
+      - name: vmstorage
+        image: victoriametrics/vmstorage:v1.129.1-cluster
+        
+        args:
+          # Storage path inside container
+          - -storageDataPath=/storage
+          
+          # Retention period for raw metrics: 14 days
+          # Format: <number><unit> where unit: s,m,h,d,w,y
+          - -retentionPeriod=14d
+          
+          # HTTP API port for vminsert/vmselect communication
+          - -httpListenAddr=:8482
+          
+          # vminsert connections port
+          - -vminsertAddr=:8400
+          
+          # vmselect connections port  
+          - -vmselectAddr=:8401
+          
+          # Memory limit for caching (80% of container limit)
+          # Improves query performance
+          - -memory.allowedPercent=80
+          
+          # REPLICATION: Uncomment for data redundancy
+          # - -replicationFactor=2
+          # Stores each datapoint on 2 vmstorage nodes
+          
+          # Deduplication interval: merge points within 1 minute
+          # Reduces storage for high-frequency scrapers
+          - -dedup.minScrapeInterval=1m
+        
+        ports:
+        - containerPort: 8482
+          name: http
+          protocol: TCP
+        - containerPort: 8400
+          name: vminsert
+          protocol: TCP
+        - containerPort: 8401
+          name: vmselect
+          protocol: TCP
+        
+        # Resource limits and requests
+        # Adjust based on metric volume
+        resources:
+          requests:
+            # Minimum guaranteed resources
+            cpu: 500m       # 0.5 CPU cores
+            memory: 1Gi     # 1GB RAM
+          limits:
+            # Maximum allowed resources
+            cpu: 2000m      # 2 CPU cores
+            memory: 2Gi     # 2GB RAM
+        
+        # Health checks
+        livenessProbe:
+          # Restart container if this fails
+          httpGet:
+            path: /health
+            port: 8482
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          # Remove from service if this fails
+          httpGet:
+            path: /health
+            port: 8482
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+        
+        volumeMounts:
+        - name: storage
+          mountPath: /storage
+  
+  # PVC template - creates PVC for each replica
+  volumeClaimTemplates:
+  - metadata:
+      name: storage
+    spec:
+      # Longhorn storage class for distributed block storage
+      # Provides replication at storage layer (typically 3 replicas)
+      storageClassName: longhorn
+      
+      accessModes:
+        # ReadWriteOnce: Volume mounted by single node
+        # Required for StatefulSets
+        - ReadWriteOnce
+      
+      resources:
+        requests:
+          # 15GB: ~8GB raw (14d) + 5GB aggregated (12mo) + 2GB overhead
+          storage: 15Gi
+
+---
+# Headless service for StatefulSet
+# Provides stable DNS: vmstorage-0.vmstorage.observability-stack.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: vmstorage
+  namespace: observability-stack
+  labels:
+    app: victoriametrics
+    component: vmstorage
+spec:
+  # clusterIP: None makes this a headless service
+  # Required for StatefulSet pod DNS resolution
+  clusterIP: None
+  
+  selector:
+    app: victoriametrics
+    component: vmstorage
+  
+  ports:
+  - port: 8482
+    name: http
+    protocol: TCP
+  - port: 8400
+    name: vminsert
+    protocol: TCP
+  - port: 8401
+    name: vmselect
+    protocol: TCP

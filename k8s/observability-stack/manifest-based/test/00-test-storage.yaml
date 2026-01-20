@@ -1,0 +1,67 @@
+---
+# This creates a small volume to validate storage provisioning
+# DELETE THIS after verification is complete
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-pvc
+  namespace: observability-stack
+spec:
+  storageClassName: longhorn
+  
+  # RWO: Volume can be mounted read-write by single node
+  # Required for StatefulSets (vmstorage, loki-backend, tempo-ingester)
+  accessModes:
+    - ReadWriteOnce
+  
+  # Small test volume - just to verify provisioning works
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# Test pod that writes to the PVC and verifies it's writable
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-storage-pod
+  namespace: observability-stack
+spec:
+  containers:
+  - name: test
+    image: busybox
+    command:
+      - sh
+      - -c
+      - |
+        # Write test file
+        echo "PV test at $(date)" > /data/test.txt
+        
+        # Verify write succeeded
+        cat /data/test.txt
+        
+        # Check disk space
+        df -h /data
+        
+        # Keep pod running for manual inspection
+        sleep 3600
+    
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "100m"
+      limits:
+        memory: "128Mi"
+        cpu: "200m"
+    
+    volumeMounts:
+    - name: test-volume
+      mountPath: /data
+  
+  volumes:
+  - name: test-volume
+    persistentVolumeClaim:
+      claimName: test-pvc
+  
+  # Don't restart if test completes
+  restartPolicy: Never

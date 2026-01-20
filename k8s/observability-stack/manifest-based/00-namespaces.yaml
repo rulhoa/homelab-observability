@@ -1,0 +1,32 @@
+---
+# Namespace for core observability stack components
+# Contains: VictoriaMetrics, Loki, Tempo, Grafana
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability-stack
+  labels:
+    name: observability-stack
+    purpose: metrics-logs-traces-storage
+
+---
+# Namespace for data collection layer
+# Contains: Grafana Alloy (collector/forwarder)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability-collectors
+  labels:
+    name: observability-collectors
+    purpose: telemetry-collection
+
+---
+# Namespace for demo applications
+# Contains: Python and Go demo apps with OpenTelemetry instrumentation
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-apps
+  labels:
+    name: demo-apps
+    purpose: testing-and-examples

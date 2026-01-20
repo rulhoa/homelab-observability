@@ -1,0 +1,377 @@
+---
+# ConfigMap for Tempo configuration
+# Single binary runs all components in monolithic mode
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tempo-config
+  namespace: observability-stack
+data:
+  tempo.yaml: |
+    # Tempo server configuration
+    server:
+      http_listen_port: 3200
+      grpc_listen_port: 9095
+      log_level: info
+    
+    # Distributor configuration (receives traces)
+    distributor:
+      receivers:
+        # OTLP receiver for OpenTelemetry traces
+        otlp:
+          protocols:
+            # HTTP endpoint: /v1/traces (port 4318)
+            http:
+              endpoint: 0.0.0.0:4318
+            # gRPC endpoint (port 4317)
+            grpc:
+              endpoint: 0.0.0.0:4317
+        
+        # Jaeger receiver (optional, for compatibility)
+        jaeger:
+          protocols:
+            # Thrift compact (UDP port 6831)
+            thrift_compact:
+              endpoint: 0.0.0.0:6831
+            # Thrift HTTP (port 14268)
+            thrift_http:
+              endpoint: 0.0.0.0:14268
+            # gRPC (port 14250)
+            grpc:
+              endpoint: 0.0.0.0:14250
+        
+        # Zipkin receiver (optional)
+        zipkin:
+          endpoint: 0.0.0.0:9411
+    
+    # Ingester configuration (writes traces to storage)
+    ingester:
+      # Max trace idle time before flushing
+      max_block_duration: 5m
+      # Max block size before flushing
+      max_block_bytes: 1048576  # 1MB
+      # Complete block timeout
+      complete_block_timeout: 10m
+    
+    # Compactor configuration (merges blocks and enforces retention)
+    compactor:
+      compaction:
+        # How often to run compaction
+        compaction_window: 1h
+        # Max compaction range
+        max_compaction_range: 24h
+        # Block retention (2 days as requested)
+        block_retention: 48h
+        # Compacted block retention
+        compacted_block_retention: 1h
+        # Max time range per block
+        max_block_bytes: 107374182400  # 100GB
+        # Retention concurrency
+        retention_concurrency: 10
+    
+    # Storage configuration
+    storage:
+      trace:
+        # Backend storage type
+        backend: local
+        
+        # Local filesystem storage
+        local:
+          path: /var/tempo/traces
+        
+        # Write-Ahead Log configuration
+        wal:
+          path: /var/tempo/wal
+        
+        # Block configuration
+        block:
+          # Use Parquet v3 format (best compression)
+          version: vParquet3
+        
+        # Cache configuration
+        cache: none
+        
+        # Block storage pool
+        pool:
+          max_workers: 100
+          queue_depth: 10000
+    
+    # Query frontend configuration
+    query_frontend:
+      # Max retries for failed queries
+      max_retries: 2
+      search:
+        # Default search duration
+        default_result_limit: 20
+        # Max search duration
+        max_duration: 0s  # Unlimited
+    
+    # Metrics generator (optional - generates metrics from traces)
+    metrics_generator:
+      # Disable for now to save resources
+      # Enable this to get RED metrics from traces
+      processor:
+        service_graphs:
+          enabled: false
+        span_metrics:
+          enabled: false
+    
+    # Overrides configuration (limits per tenant)
+    overrides:
+      defaults:
+        # Max bytes per trace (50MB)
+        max_bytes_per_trace: 52428800
+        # Max spans per trace
+        max_spans_per_trace: 100000
+        # Ingestion rate limit (100MB/s)
+        ingestion_rate_limit_bytes: 104857600
+        # Ingestion burst size (200MB)
+        ingestion_burst_size_bytes: 209715200
+        # Max search duration
+        max_search_duration: 0s
+
+---
+# StatefulSet for Tempo (monolithic mode)
+# Single pod runs all Tempo components
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tempo
+  namespace: observability-stack
+  labels:
+    app: tempo
+    mode: monolithic
+spec:
+  replicas: 1
+  
+  serviceName: tempo
+  
+  # RollingUpdate strategy
+  updateStrategy:
+    type: RollingUpdate
+  
+  podManagementPolicy: OrderedReady
+  
+  selector:
+    matchLabels:
+      app: tempo
+      mode: monolithic
+  
+  template:
+    metadata:
+      labels:
+        app: tempo
+        mode: monolithic
+    spec:
+      # Security context
+      securityContext:
+        fsGroup: 10001
+        runAsUser: 10001
+        runAsNonRoot: true
+      
+      containers:
+      - name: tempo
+        image: grafana/tempo:2.9.0
+        
+        args:
+          # Monolithic mode: run all components
+          - -config.file=/etc/tempo/tempo.yaml
+          - -target=all
+          # Memory ballast (helps with GC performance)
+          - -mem-ballast-size-mbs=1024
+        
+        ports:
+        # Tempo HTTP API
+        - containerPort: 3200
+          name: http
+          protocol: TCP
+        
+        # Tempo gRPC
+        - containerPort: 9095
+          name: grpc
+          protocol: TCP
+        
+        # OTLP gRPC receiver
+        - containerPort: 4317
+          name: otlp-grpc
+          protocol: TCP
+        
+        # OTLP HTTP receiver
+        - containerPort: 4318
+          name: otlp-http
+          protocol: TCP
+        
+        # Jaeger Thrift compact (UDP)
+        - containerPort: 6831
+          name: jaeger-compact
+          protocol: UDP
+        
+        # Jaeger Thrift HTTP
+        - containerPort: 14268
+          name: jaeger-http
+          protocol: TCP
+        
+        # Jaeger gRPC
+        - containerPort: 14250
+          name: jaeger-grpc
+          protocol: TCP
+        
+        # Zipkin
+        - containerPort: 9411
+          name: zipkin
+          protocol: TCP
+        
+        env:
+        # Disable multi-tenancy
+        - name: TEMPO_MULTITENANCY_ENABLED
+          value: "false"
+        
+        # Resource allocation
+        resources:
+          requests:
+            cpu: 500m       # 0.5 CPU cores
+            memory: 1Gi     # 1GB RAM
+          limits:
+            cpu: 2000m      # 2 CPU cores
+            memory: 2Gi     # 2GB RAM
+        
+        # Health checks
+        livenessProbe:
+          httpGet:
+            path: /ready
+            port: 3200
+          initialDelaySeconds: 45
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3200
+          initialDelaySeconds: 30
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+        
+        volumeMounts:
+        # Config file
+        - name: config
+          mountPath: /etc/tempo
+        
+        # Persistent storage for traces
+        - name: storage
+          mountPath: /var/tempo
+      
+      volumes:
+      # Tempo configuration
+      - name: config
+        configMap:
+          name: tempo-config
+  
+  # PVC template
+  volumeClaimTemplates:
+  - metadata:
+      name: storage
+    spec:
+      # Longhorn storage class
+      storageClassName: longhorn
+      
+      accessModes:
+        - ReadWriteOnce
+      
+      resources:
+        requests:
+          # 5GB: 2 days retention, auto-compaction
+          storage: 5Gi
+
+---
+# Headless service for Tempo
+apiVersion: v1
+kind: Service
+metadata:
+  name: tempo
+  namespace: observability-stack
+  labels:
+    app: tempo
+spec:
+  clusterIP: None
+  
+  selector:
+    app: tempo
+    mode: monolithic
+  
+  ports:
+  - port: 3200
+    name: http
+    protocol: TCP
+  - port: 9095
+    name: grpc
+    protocol: TCP
+  - port: 4317
+    name: otlp-grpc
+    protocol: TCP
+  - port: 4318
+    name: otlp-http
+    protocol: TCP
+  - port: 6831
+    name: jaeger-compact
+    protocol: UDP
+  - port: 14268
+    name: jaeger-http
+    protocol: TCP
+  - port: 14250
+    name: jaeger-grpc
+    protocol: TCP
+  - port: 9411
+    name: zipkin
+    protocol: TCP
+
+---
+# LoadBalancer service for external access
+# Exposes OTLP receivers for testing
+apiVersion: v1
+kind: Service
+metadata:
+  name: tempo-lb
+  namespace: observability-stack
+  labels:
+    app: tempo
+spec:
+  # LoadBalancer: MetalLB assigns external IP
+  type: LoadBalancer
+  
+  selector:
+    app: tempo
+    mode: monolithic
+  
+  ports:
+  # Tempo query API
+  - port: 3200
+    targetPort: 3200
+    protocol: TCP
+    name: http
+  
+  # OTLP gRPC receiver (most common)
+  - port: 4317
+    targetPort: 4317
+    protocol: TCP
+    name: otlp-grpc
+  
+  # OTLP HTTP receiver
+  - port: 4318
+    targetPort: 4318
+    protocol: TCP
+    name: otlp-http
+  
+  # Jaeger HTTP receiver
+  - port: 14268
+    targetPort: 14268
+    protocol: TCP
+    name: jaeger-http
+  
+  # Zipkin receiver
+  - port: 9411
+    targetPort: 9411
+    protocol: TCP
+    name: zipkin

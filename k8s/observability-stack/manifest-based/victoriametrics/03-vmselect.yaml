@@ -1,0 +1,138 @@
+---
+# Deployment for vmselect - handles metric queries
+# Stateless component: reads from vmstorage
+# Used by Grafana and vmalert to query metrics
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmselect
+  namespace: observability-stack
+  labels:
+    app: victoriametrics
+    component: vmselect
+spec:
+  # Single replica for now
+  # REPLICATION: Increase to 2-3 for query load distribution
+  replicas: 1
+  
+  selector:
+    matchLabels:
+      app: victoriametrics
+      component: vmselect
+  
+  template:
+    metadata:
+      labels:
+        app: victoriametrics
+        component: vmselect
+    spec:
+      containers:
+      - name: vmselect
+        image: victoriametrics/vmselect:v1.129.1-cluster
+        
+        args:
+          # HTTP API listen address
+          - -httpListenAddr=:8481
+          
+          # vmstorage backend addresses for queries
+          # REPLICATION: For 3 replicas:
+          # - -storageNode=vmstorage-0.vmstorage:8401,vmstorage-1.vmstorage:8401,vmstorage-2.vmstorage:8401
+          - -storageNode=vmstorage-0.vmstorage:8401
+          
+          # Deduplication interval: merge duplicate samples within 1 minute
+          # Must match vmstorage setting
+          - -dedup.minScrapeInterval=1m
+          
+          # Memory for query processing and caching
+          - -memory.allowedPercent=80
+          
+          # Cache size for recent queries (speeds up dashboard refreshes)
+          - -search.maxQueryDuration=60s
+          
+          # Max concurrent queries
+          - -search.maxConcurrentRequests=8
+          
+          # REPLICATION: Enable when using replication
+          # - -replicationFactor=2
+        
+        ports:
+        - containerPort: 8481
+          name: http
+          protocol: TCP
+        
+        # Resource allocation
+        resources:
+          requests:
+            cpu: 250m       # 0.25 CPU cores
+            memory: 512Mi   # 512MB RAM
+          limits:
+            cpu: 1000m      # 1 CPU core  
+            memory: 1Gi     # 1GB RAM
+        
+        # Health checks
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8481
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8481
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+
+---
+# ClusterIP service for vmselect
+# Used by Grafana and vmalert to query metrics
+apiVersion: v1
+kind: Service
+metadata:
+  name: vmselect
+  namespace: observability-stack
+  labels:
+    app: victoriametrics
+    component: vmselect
+spec:
+  type: ClusterIP
+  
+  selector:
+    app: victoriametrics
+    component: vmselect
+  
+  ports:
+  - port: 8481
+    targetPort: 8481
+    protocol: TCP
+    name: http
+
+---
+# LoadBalancer service for external access (optional, for testing)
+# Provides external IP to query metrics directly
+apiVersion: v1
+kind: Service
+metadata:
+  name: vmselect-lb
+  namespace: observability-stack
+  labels:
+    app: victoriametrics
+    component: vmselect
+spec:
+  # LoadBalancer: MetalLB assigns external IP
+  type: LoadBalancer
+  
+  selector:
+    app: victoriametrics
+    component: vmselect
+  
+  ports:
+  - port: 8481
+    targetPort: 8481
+    protocol: TCP
+    name: http
