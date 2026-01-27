@@ -2,4 +2,4 @@
 
 helm dependency update || helm dependency build 
 
-helm upgrade --namespace observability-stack o11y .
+helm install --namespace observability-stack --create-namespace o11y .
