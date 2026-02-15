@@ -148,11 +148,14 @@ tempo:
           endpoint: "0.0.0.0:4317"
         http:
           endpoint: "0.0.0.0:4318"
-  securityContext: {}
-    # allowPrivilegeEscalation: false
-    #  capabilities:
-    #    drop:
-    #    - ALL
+  securityContext: #{}
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+    runAsNonRoot: true
     # readOnlyRootFilesystem: true
   ## Additional container arguments
   extraArgs: {}
@@ -276,11 +279,15 @@ tempoQuery:
   #   mountPath: /mnt/volume
   #   readOnly: true
   #   existingClaim: volume-claim
-  securityContext: {}
-    # allowPrivilegeEscalation: false
-    #  capabilities:
-    #    drop:
-    #    - ALL
+
+  securityContext: #{}
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+    runAsNonRoot: true
     # readOnlyRootFilesystem: false # fails if true, do not enable
 
 # -- securityContext for container
