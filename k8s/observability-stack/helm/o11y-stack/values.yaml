@@ -445,6 +445,10 @@ alloy:
   image:
     # -- (string) Grafana Alloy image tag. When empty, the Chart's appVersion is
     # used.
-    tag: "v1.12.1"
+    tag: "v1.16.0"
 
+
+  service:
+    # -- Service type
+    type: LoadBalancer
 

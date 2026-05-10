@@ -1,9 +1,8 @@
 #!/usr/bin/sh
 
-#helm dependency update || helm dependency build 
-
+# Make sure updates are done in values.yaml
 helm upgrade --namespace observability-stack o11y .
 
 sleep 1
 # To force a reload of the config map
-kubectl rollout restart ds/o11y-alloy
+kubectl -n observability-stack rollout restart daemonset/o11y-alloy
